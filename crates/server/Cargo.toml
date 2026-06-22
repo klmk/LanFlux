@@ -1,0 +1,27 @@
+[package]
+name = "net-tool-server"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "net-tool-server"
+path = "src/main.rs"
+
+[dependencies]
+net-tool-common.workspace = true
+net-tool-network.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+axum.workspace = true
+tower.workspace = true
+tower-http.workspace = true
+sqlx.workspace = true
+toml.workspace = true
+bytes.workspace = true

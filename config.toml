@@ -1,0 +1,29 @@
+# NetTool 服务端默认配置文件
+#
+# 配置加载优先级：环境变量 > 本文件 > 代码内默认值
+# 环境变量前缀为 NETTOOL_，例如 NETTOOL_LISTEN_ADDR、NETTOOL_DATABASE_URL
+
+# HTTP 监听地址
+listen_addr = "0.0.0.0:8443"
+
+# SQLite 数据库连接字符串
+# mode=rwc 表示数据库文件不存在时自动创建
+database_url = "sqlite:///data/nettool.db?mode=rwc"
+
+# Web 管理后台静态文件目录
+web_admin_dir = "./web-admin"
+
+# 日志级别：error / warn / info / debug / trace
+log_level = "info"
+
+# 客户映射地址池 CIDR（用于分配给客户端真实网段的映射网段）
+client_pool_cidr = "100.64.0.0/10"
+
+# 单个映射网段大小（前缀长度），初版固定为 24
+segment_size = 24
+
+# 实施端地址池 CIDR（用于分配给实施端的虚拟 IP）
+operator_pool_cidr = "100.127.0.0/24"
+
+# 服务端虚拟 IP（实施端访问该 IP 即可到达服务端控制面）
+server_virtual_ip = "100.127.0.1"

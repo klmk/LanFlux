@@ -1,0 +1,14 @@
+[package]
+name = "net-tool-network"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+net-tool-common.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+anyhow.workspace = true
+tun-rs.workspace = true
+bytes.workspace = true

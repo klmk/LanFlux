@@ -1,0 +1,53 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/common",
+    "crates/server",
+    "crates/client",
+    "crates/network",
+]
+# 桌面端 Tauri 项目使用独立的构建流程（npm run tauri），排除出 workspace
+exclude = [
+    "desktop/src-tauri",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "LGPL-3.0"
+authors = ["NetTool Team"]
+
+[workspace.dependencies]
+# 序列化
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# 异步运行时
+tokio = { version = "1", features = ["full"] }
+# 日志
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# 错误处理
+anyhow = "1"
+thiserror = "1"
+# 时间
+chrono = { version = "0.4", features = ["serde"] }
+# UUID
+uuid = { version = "1", features = ["v4", "serde"] }
+# 网络
+reqwest = { version = "0.12", features = ["json"] }
+axum = "0.7"
+tower = "0.4"
+tower-http = { version = "0.5", features = ["cors", "fs"] }
+# 数据库
+sqlx = { version = "0.7", features = ["runtime-tokio", "sqlite", "chrono", "uuid"] }
+# CLI
+clap = { version = "4", features = ["derive"] }
+# 配置
+toml = "0.8"
+# TUN 虚拟网卡
+tun-rs = { version = "2", features = ["async_tokio"] }
+# 字节序
+bytes = "1"
+# 内部 crate
+net-tool-common = { path = "crates/common" }
+net-tool-network = { path = "crates/network" }
