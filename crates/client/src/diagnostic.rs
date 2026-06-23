@@ -15,7 +15,7 @@ use net_tool_common::{ClientConfig, NodeRole};
 
 use crate::config;
 use crate::connection::{ConnectionStatus, ServerConnection};
-use crate::detect_os;
+use crate::cli::detect_os;
 
 /// 软件版本。
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

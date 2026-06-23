@@ -3,6 +3,10 @@ name = "net-tool-client"
 version.workspace = true
 edition.workspace = true
 
+[lib]
+name = "net_tool_client"
+path = "src/lib.rs"
+
 [[bin]]
 name = "net-tool"
 path = "src/main.rs"

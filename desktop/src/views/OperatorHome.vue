@@ -3,23 +3,73 @@ import { ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import ConnectionBar from '../components/ConnectionBar.vue'
 import StatusBadge from '../components/StatusBadge.vue'
-import { loadConfig, saveConfig } from '../tauri.js'
-import { setServerAddr, registerNode, queryAccess } from '../api.js'
+import { useToast } from '../composables/useToast.js'
+import {
+  connectOperator,
+  startTunnel,
+  stopTunnel,
+  getStatus,
+  getAccessibleSegments,
+  disconnectAll,
+  testConnectivity,
+  saveConfig,
+  loadConfig
+} from '../tauri.js'
 
 const router = useRouter()
+const { showToast } = useToast()
 
 const serverAddr = ref('127.0.0.1:8443')
+const nodeName = ref('')
 const virtualIp = ref('')
+// disconnected | connecting | connected
 const connectionStatus = ref('disconnected')
+// disconnected | connecting | connected
+const tunnelStatus = ref('disconnected')
 const nodeId = ref('')
 const segments = ref([])
+// getStatus() 原始返回，用于展示附加信息
+const statusInfo = ref(null)
+
 const loading = ref(false)
 const connecting = ref(false)
+const startingTunnel = ref(false)
+const testing = ref(false)
+const testResult = ref(null)
 
 async function initConfig() {
   try {
     const config = await loadConfig()
     serverAddr.value = config.server_addr || '127.0.0.1:8443'
+    nodeName.value = config.node_name || ''
+  } catch {
+    // ignore
+  }
+  // 尝试恢复已有连接 / 隧道状态
+  await refreshStatus()
+}
+
+async function refreshStatus() {
+  try {
+    const s = await getStatus()
+    statusInfo.value = s
+    // 依据 virtual_ip 判断是否已连接
+    if (s.virtual_ip) {
+      virtualIp.value = s.virtual_ip
+      if (s.node_id) nodeId.value = s.node_id
+      if (connectionStatus.value === 'disconnected') {
+        connectionStatus.value = 'connected'
+      }
+    }
+    // 隧道状态映射
+    const ts = String(s.tunnel_status || '').toLowerCase()
+    if (ts.includes('connect') && !ts.includes('dis') && !ts.includes('断')) {
+      tunnelStatus.value = 'connected'
+    } else if (ts.includes('connecting') || ts.includes('连接中')) {
+      tunnelStatus.value = 'connecting'
+    } else {
+      tunnelStatus.value = 'disconnected'
+    }
   } catch {
     // ignore
   }
@@ -27,9 +77,10 @@ async function initConfig() {
 
 async function handleConnect() {
   if (!serverAddr.value.trim()) {
-    alert('请输入服务端地址')
+    showToast('请输入服务端地址', 'warning')
     return
   }
+  const name = nodeName.value.trim() || '实施端-' + Math.random().toString(36).slice(2, 8)
 
   connecting.value = true
   connectionStatus.value = 'connecting'
@@ -38,61 +89,121 @@ async function handleConnect() {
     await saveConfig({
       mode: 'operator',
       server_addr: serverAddr.value,
-      node_name: '',
+      node_name: name,
       remark: '',
       auto_reconnect: true
     })
 
-    setServerAddr(serverAddr.value)
-
-    // 注册为实施端
-    const res = await registerNode({
-      name: '实施端-' + Math.random().toString(36).slice(2, 8),
-      role: 'operator',
-      os_type: detectOs(),
-      remark: null
-    })
-    nodeId.value = res.node_id
+    // 以实施端模式连接服务端
+    const res = await connectOperator(serverAddr.value, name)
+    nodeId.value = res.node_id || ''
     virtualIp.value = res.virtual_ip || ''
+    segments.value = res.accessible_segments || []
 
     connectionStatus.value = 'connected'
+    showToast(
+      `连接成功，虚拟 IP：${virtualIp.value || '-'}，可访问网段 ${segments.value.length} 个`,
+      'success'
+    )
 
-    // 加载可访问网段
-    await loadSegments()
+    await refreshStatus()
   } catch (e) {
     console.error('连接失败', e)
     connectionStatus.value = 'disconnected'
-    alert('连接失败: ' + (e.message || e))
+    showToast('连接失败：' + (e.message || e), 'error')
   } finally {
     connecting.value = false
   }
 }
 
-function handleDisconnect() {
+async function handleDisconnect() {
+  try {
+    await disconnectAll()
+    showToast('已断开所有连接', 'success')
+  } catch (e) {
+    showToast('断开失败：' + (e.message || e), 'error')
+  }
   connectionStatus.value = 'disconnected'
+  tunnelStatus.value = 'disconnected'
   nodeId.value = ''
   virtualIp.value = ''
   segments.value = []
+  testResult.value = null
+  await refreshStatus()
 }
 
 async function loadSegments() {
-  if (!nodeId.value) return
+  if (connectionStatus.value !== 'connected') {
+    showToast('请先连接服务端', 'warning')
+    return
+  }
   loading.value = true
   try {
-    const res = await queryAccess(nodeId.value)
-    segments.value = (res.allowed_segments || []).map((r) => ({
-      segment_id: '',
-      node_id: r.target_node_id,
-      node_name: r.target_node_name,
-      segment_name: r.segment_name,
-      real_cidr: r.real_cidr,
-      mapped_cidr: r.mapped_cidr,
-      status: 'active'
-    }))
+    segments.value = await getAccessibleSegments()
+    showToast(`已加载 ${segments.value.length} 个可访问网段`, 'info')
   } catch (e) {
     console.error('加载可访问网段失败', e)
+    showToast('加载可访问网段失败：' + (e.message || e), 'error')
   } finally {
     loading.value = false
+  }
+}
+
+async function handleStartTunnel() {
+  startingTunnel.value = true
+  tunnelStatus.value = 'connecting'
+  try {
+    const res = await startTunnel()
+    tunnelStatus.value = 'connected'
+    const routeCount = res && Array.isArray(res.routes) ? res.routes.length : 0
+    showToast(`隧道启动成功，下发 ${routeCount} 条路由`, 'success')
+    await refreshStatus()
+  } catch (e) {
+    console.error('启动隧道失败', e)
+    tunnelStatus.value = 'disconnected'
+    showToast('启动隧道失败：' + (e.message || e), 'error')
+  } finally {
+    startingTunnel.value = false
+  }
+}
+
+async function handleStopTunnel() {
+  try {
+    await stopTunnel()
+    tunnelStatus.value = 'disconnected'
+    showToast('隧道已停止', 'success')
+    await refreshStatus()
+  } catch (e) {
+    showToast('停止隧道失败：' + (e.message || e), 'error')
+  }
+}
+
+async function handleTestConnectivity() {
+  if (!serverAddr.value.trim()) {
+    showToast('请先填写服务端地址', 'warning')
+    return
+  }
+  testing.value = true
+  testResult.value = null
+  try {
+    const addr = serverAddr.value.trim().replace(/^https?:\/\//, '').replace(/\/$/, '')
+    const [host, portStr] = addr.split(':')
+    const port = parseInt(portStr) || 8443
+    testResult.value = await testConnectivity(host, port)
+    if (testResult.value.success) {
+      showToast('服务端连通性测试成功', 'success')
+    } else {
+      showToast('服务端连通性测试失败', 'error')
+    }
+  } catch (e) {
+    testResult.value = {
+      success: false,
+      elapsed_ms: 0,
+      message: '测试失败：' + (e.message || e)
+    }
+    showToast('连通性测试异常：' + (e.message || e), 'error')
+  } finally {
+    testing.value = false
   }
 }
 
@@ -102,14 +213,6 @@ function goTest() {
 
 function goSegments() {
   router.push('/operator/segments')
-}
-
-function detectOs() {
-  const ua = navigator.userAgent
-  if (ua.includes('Win')) return 'windows'
-  if (ua.includes('Linux')) return 'linux'
-  if (ua.includes('Mac')) return 'macos'
-  return 'unknown'
 }
 
 onMounted(initConfig)
@@ -143,6 +246,15 @@ onMounted(initConfig)
           />
         </div>
         <div class="form-group">
+          <label class="form-label">节点名称</label>
+          <input
+            class="form-input"
+            v-model="nodeName"
+            placeholder="可选，留空将自动生成"
+            :disabled="connectionStatus !== 'disconnected'"
+          />
+        </div>
+        <div class="form-group">
           <label class="form-label">虚拟 IP</label>
           <input
             class="form-input mono"
@@ -152,7 +264,61 @@ onMounted(initConfig)
         </div>
       </div>
       <div class="form-hint">
-        实施端连接后将自动分配虚拟 IP，可访问服务端授权的网段。
+        实施端连接后将自动分配虚拟 IP，可访问服务端授权的网段；连接成功后可启动隧道。
+      </div>
+    </div>
+
+    <!-- 隧道与状态 -->
+    <div class="card">
+      <div class="card-title">
+        <span>隧道与状态</span>
+        <div class="actions">
+          <button class="btn btn-sm" @click="refreshStatus">刷新状态</button>
+        </div>
+      </div>
+      <div class="desc-list">
+        <div class="desc-label">连接状态</div>
+        <div class="desc-value">
+          <StatusBadge :status="connectionStatus" type="node" />
+        </div>
+        <div class="desc-label">隧道状态</div>
+        <div class="desc-value">
+          <StatusBadge :status="tunnelStatus" type="node" />
+        </div>
+        <div class="desc-label">节点 ID</div>
+        <div class="desc-value mono">{{ nodeId || (statusInfo?.node_id || '-') }}</div>
+        <div class="desc-label">节点名称</div>
+        <div class="desc-value">{{ statusInfo?.node_name || nodeName || '-' }}</div>
+        <div class="desc-label">虚拟 IP</div>
+        <div class="desc-value mono">{{ virtualIp || (statusInfo?.virtual_ip || '-') }}</div>
+        <div class="desc-label">可访问网段数</div>
+        <div class="desc-value">{{ statusInfo?.accessible_segments_count ?? segments.length }}</div>
+      </div>
+
+      <div class="tunnel-actions">
+        <button
+          class="btn btn-primary"
+          @click="handleStartTunnel"
+          :disabled="connectionStatus !== 'connected' || tunnelStatus === 'connected' || startingTunnel"
+        >
+          {{ startingTunnel ? '启动中...' : '启动隧道' }}
+        </button>
+        <button
+          class="btn btn-danger"
+          @click="handleStopTunnel"
+          :disabled="tunnelStatus !== 'connected'"
+        >
+          停止隧道
+        </button>
+        <button class="btn" @click="handleTestConnectivity" :disabled="testing">
+          {{ testing ? '测试中...' : '测试服务端连通性' }}
+        </button>
+      </div>
+
+      <div v-if="testResult" class="test-result" :class="testResult.success ? 'test-success' : 'test-fail'">
+        <span class="test-mark">{{ testResult.success ? '[OK]' : '[FAIL]' }}</span>
+        <span class="test-msg">{{ testResult.message }}</span>
+        <span class="test-time">({{ testResult.elapsed_ms }} ms)</span>
       </div>
     </div>
 
@@ -161,7 +327,7 @@ onMounted(initConfig)
       <div class="card-title">
         <span>可访问网段 ({{ segments.length }})</span>
         <div class="actions">
-          <button class="btn btn-sm" @click="loadSegments" :disabled="!nodeId">刷新</button>
+          <button class="btn btn-sm" @click="loadSegments" :disabled="connectionStatus !== 'connected'">刷新</button>
           <button class="btn btn-sm" @click="goSegments">查看全部</button>
         </div>
       </div>
@@ -183,11 +349,11 @@ onMounted(initConfig)
           </thead>
           <tbody>
             <tr v-for="(seg, i) in segments" :key="i">
-              <td>{{ seg.node_name }}</td>
+              <td>{{ seg.target_node_name || seg.node_name }}</td>
               <td>{{ seg.segment_name }}</td>
               <td class="mono">{{ seg.real_cidr }}</td>
               <td class="mono">{{ seg.mapped_cidr }}</td>
-              <td><StatusBadge :status="seg.status" type="segment" /></td>
+              <td><StatusBadge status="active" type="segment" /></td>
             </tr>
           </tbody>
         </table>
@@ -201,7 +367,7 @@ onMounted(initConfig)
         <button class="quick-btn" @click="goTest">
           <span class="quick-icon">⇄</span>
           <span class="quick-label">连通性测试</span>
-          <span class="quick-desc">Ping / TCP / UDP 测试</span>
+          <span class="quick-desc">Ping / TCP 测试</span>
         </button>
         <button class="quick-btn" @click="goTest">
           <span class="quick-icon">▦</span>
@@ -215,10 +381,47 @@ onMounted(initConfig)
         </button>
       </div>
     </div>
+
   </div>
 </template>
 
 <style scoped>
+.tunnel-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 16px;
+  flex-wrap: wrap;
+}
+
+.test-result {
+  margin-top: 14px;
+  padding: 10px 14px;
+  border-radius: var(--radius);
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.test-success {
+  background: var(--status-green-bg);
+  color: var(--status-green);
+}
+
+.test-fail {
+  background: var(--status-red-bg);
+  color: var(--status-red);
+}
+
+.test-mark {
+  font-weight: 700;
+}
+
+.test-time {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
 .quick-actions {
   display: grid;
   grid-template-columns: repeat(3, 1fr);

@@ -8,9 +8,11 @@
 #   3. 复制产物到 dist 目录，形成可部署的产物集合
 #
 # 用法：
-#   ./scripts/build.sh                # 完整构建（服务端 + 前端）
-#   ./scripts/build.sh --server-only  # 仅构建服务端
-#   ./scripts/build.sh --web-only     # 仅构建前端
+#   ./scripts/build.sh                  # 完整构建（服务端 + 前端）
+#   ./scripts/build.sh --server-only    # 仅构建服务端
+#   ./scripts/build.sh --web-only       # 仅构建前端
+#   ./scripts/build.sh --desktop        # 构建桌面端（Tauri）
+#   ./scripts/build.sh --all            # 完整构建 + 桌面端
 # =============================================================================
 
 set -euo pipefail
@@ -35,6 +37,7 @@ step()  { echo -e "${BLUE}[STEP]${NC}  $*"; }
 # ---------------------------- 参数解析 ----------------------------
 BUILD_SERVER=true
 BUILD_WEB=true
+BUILD_DESKTOP=false
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --server-only)
@@ -45,9 +48,21 @@ while [[ $# -gt 0 ]]; do
             BUILD_SERVER=false
             shift
             ;;
+        --desktop)
+            BUILD_DESKTOP=true
+            BUILD_SERVER=false
+            BUILD_WEB=false
+            shift
+            ;;
+        --all)
+            BUILD_DESKTOP=true
+            shift
+            ;;
         --help|-h)
-            echo "用法: $0 [--server-only|--web-only]"
-            echo "  不带参数时执行完整构建。"
+            echo "用法: $0 [--server-only|--web-only|--desktop|--all]"
+            echo "  不带参数时执行完整构建（服务端 + 前端）。"
+            echo "  --desktop   仅构建桌面端 Tauri 应用"
+            echo "  --all       完整构建 + 桌面端"
             exit 0
             ;;
         *)
@@ -116,40 +131,91 @@ if [ "$BUILD_WEB" = true ]; then
     fi
 fi
 
+# ---------------------------- 构建桌面端 ----------------------------
+if [ "$BUILD_DESKTOP" = true ]; then
+    step "构建桌面端 Tauri 应用 (desktop)"
+
+    DESKTOP_DIR="$PROJECT_ROOT/desktop"
+    if [ ! -d "$DESKTOP_DIR" ]; then
+        error "未找到 desktop 目录。"
+        exit 1
+    fi
+
+    if ! command -v npm >/dev/null 2>&1; then
+        error "未检测到 npm，请先安装 Node.js (https://nodejs.org)。"
+        exit 1
+    fi
+
+    if ! command -v cargo >/dev/null 2>&1; then
+        error "未检测到 cargo，请先安装 Rust 工具链 (https://rustup.rs)。"
+        exit 1
+    fi
+
+    # 检查 Tauri CLI
+    info "安装桌面端依赖 (npm install) ..."
+    (cd "$DESKTOP_DIR" && npm install)
+
+    # 检查是否有 tauri CLI
+    if (cd "$DESKTOP_DIR" && npx tauri --version >/dev/null 2>&1); then
+        info "构建桌面端 (tauri build) ..."
+        (cd "$DESKTOP_DIR" && npx tauri build)
+
+        info "桌面端构建完成。"
+        info "产物位于: desktop/src-tauri/target/release/bundle/"
+    else
+        warn "未检测到 Tauri CLI，尝试仅构建前端 ..."
+        (cd "$DESKTOP_DIR" && npm run build)
+        warn "前端构建完成，但未构建 Tauri 原生应用。"
+        warn "请安装 Tauri CLI: npm install -g @tauri-apps/cli"
+    fi
+fi
+
 # ---------------------------- 汇总产物到 dist ----------------------------
-step "汇总构建产物到 $DIST_DIR"
+if [ "$BUILD_SERVER" = true ] || [ "$BUILD_WEB" = true ]; then
+    step "汇总构建产物到 $DIST_DIR"
 
-mkdir -p "$DIST_DIR"
+    mkdir -p "$DIST_DIR"
 
-if [ "$BUILD_SERVER" = true ] && [ -f "$PROJECT_ROOT/target/release/net-tool-server" ]; then
-    cp "$PROJECT_ROOT/target/release/net-tool-server" "$DIST_DIR/"
-    info "已复制: net-tool-server"
-fi
+    if [ "$BUILD_SERVER" = true ] && [ -f "$PROJECT_ROOT/target/release/net-tool-server" ]; then
+        cp "$PROJECT_ROOT/target/release/net-tool-server" "$DIST_DIR/"
+        info "已复制: net-tool-server"
+    fi
 
-if [ -f "$PROJECT_ROOT/target/release/net-tool" ]; then
-    cp "$PROJECT_ROOT/target/release/net-tool" "$DIST_DIR/"
-    info "已复制: net-tool (客户端)"
-fi
+    if [ -f "$PROJECT_ROOT/target/release/net-tool" ]; then
+        cp "$PROJECT_ROOT/target/release/net-tool" "$DIST_DIR/"
+        info "已复制: net-tool (客户端)"
+    fi
 
-if [ "$BUILD_WEB" = true ] && [ -d "$PROJECT_ROOT/web-admin/dist" ]; then
-    rm -rf "$DIST_DIR/web-admin"
-    cp -r "$PROJECT_ROOT/web-admin/dist" "$DIST_DIR/web-admin"
-    info "已复制: web-admin/"
-fi
+    if [ "$BUILD_WEB" = true ] && [ -d "$PROJECT_ROOT/web-admin/dist" ]; then
+        rm -rf "$DIST_DIR/web-admin"
+        cp -r "$PROJECT_ROOT/web-admin/dist" "$DIST_DIR/web-admin"
+        info "已复制: web-admin/"
+    fi
 
-if [ -f "$PROJECT_ROOT/config.toml" ]; then
-    cp "$PROJECT_ROOT/config.toml" "$DIST_DIR/"
-    info "已复制: config.toml"
+    if [ -f "$PROJECT_ROOT/config.toml" ]; then
+        cp "$PROJECT_ROOT/config.toml" "$DIST_DIR/"
+        info "已复制: config.toml"
+    fi
 fi
 
 # ---------------------------- 完成 ----------------------------
 echo
-info "构建完成！产物位于: $DIST_DIR"
-echo
-echo "产物清单:"
-( cd "$DIST_DIR" && find . -maxdepth 2 -type f | sort | sed 's/^/  /' )
-echo
-echo "部署方式:"
-echo "  1. 将 dist/ 目录上传到目标服务器"
-echo "  2. 运行 ./net-tool-server 启动服务端"
-echo "  或使用 Docker: docker compose up -d"
+info "构建完成！"
+if [ -d "$DIST_DIR" ]; then
+    info "服务端产物位于: $DIST_DIR"
+    echo
+    echo "产物清单:"
+    ( cd "$DIST_DIR" && find . -maxdepth 2 -type f | sort | sed 's/^/  /' )
+    echo
+    echo "部署方式:"
+    echo "  1. 将 dist/ 目录上传到目标服务器"
+    echo "  2. 运行 ./net-tool-server 启动服务端"
+    echo "  或使用 Docker: docker compose up -d"
+fi
+
+if [ "$BUILD_DESKTOP" = true ]; then
+    echo
+    echo "桌面端产物:"
+    echo "  desktop/src-tauri/target/release/bundle/"
+    echo "  构建桌面端: cd desktop && npx tauri build"
+fi

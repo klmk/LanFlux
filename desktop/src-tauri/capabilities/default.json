@@ -4,6 +4,7 @@
   "description": "NetTool 桌面客户端默认权限配置",
   "windows": ["main"],
   "permissions": [
-    "core:default"
+    "core:default",
+    "shell:allow-open"
   ]
 }

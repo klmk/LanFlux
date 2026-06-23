@@ -1,33 +1,30 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
-import { useRouter } from 'vue-router'
 import StatusBadge from '../components/StatusBadge.vue'
-import { loadConfig, testConnectivity } from '../tauri.js'
-import { setServerAddr, queryAccess } from '../api.js'
+import { useToast } from '../composables/useToast.js'
+import {
+  getAccessibleSegments,
+  refreshAccessibleSegments,
+  pingTest,
+  tcpTest
+} from '../tauri.js'
 
-const router = useRouter()
+const { showToast } = useToast()
 
 const loading = ref(false)
+const refreshing = ref(false)
 const segments = ref([])
-const filters = ref({ keyword: '', status: '' })
-
-const statusOptions = [
-  { value: '', label: '全部状态' },
-  { value: 'active', label: '已启用' },
-  { value: 'pending', label: '待确认' },
-  { value: 'disabled', label: '已停用' }
-]
+const filters = ref({ keyword: '' })
 
 const filteredSegments = computed(() => {
   return segments.value.filter((s) => {
-    if (filters.value.status && s.status !== filters.value.status) return false
     if (filters.value.keyword) {
       const kw = filters.value.keyword.toLowerCase()
       const hit =
-        s.node_name.toLowerCase().includes(kw) ||
-        s.segment_name.toLowerCase().includes(kw) ||
-        s.real_cidr.toLowerCase().includes(kw) ||
-        s.mapped_cidr.toLowerCase().includes(kw)
+        (s.target_node_name || '').toLowerCase().includes(kw) ||
+        (s.segment_name || '').toLowerCase().includes(kw) ||
+        (s.real_cidr || '').toLowerCase().includes(kw) ||
+        (s.mapped_cidr || '').toLowerCase().includes(kw)
       if (!hit) return false
     }
     return true
@@ -38,34 +35,50 @@ const filteredSegments = computed(() => {
 const testVisible = ref(false)
 const testTarget = ref(null)
 const testType = ref('ping')
-const testPort = ref('')
+const testPort = ref('80')
 const testing = ref(false)
 const testOutput = ref([])
+
+// 由映射网段推导网关 IP（末位置 1）
+function gatewayIp(cidr) {
+  if (!cidr) return ''
+  const ip = cidr.split('/')[0]
+  const parts = ip.split('.')
+  if (parts.length !== 4) return ip
+  parts[3] = '1'
+  return parts.join('.')
+}
 
 async function loadData() {
   loading.value = true
   try {
-    const res = await queryAccess('desktop-op-001')
-    segments.value = (res.allowed_segments || []).map((r) => ({
-      segment_id: '',
-      node_id: r.target_node_id,
-      node_name: r.target_node_name,
-      segment_name: r.segment_name,
-      real_cidr: r.real_cidr,
-      mapped_cidr: r.mapped_cidr,
-      status: 'active'
-    }))
+    segments.value = await getAccessibleSegments()
   } catch (e) {
     console.error('加载可访问网段失败', e)
+    showToast('加载可访问网段失败：' + (e.message || e), 'error')
+    segments.value = []
   } finally {
     loading.value = false
+  }
+}
+
+async function handleRefresh() {
+  refreshing.value = true
+  try {
+    segments.value = await refreshAccessibleSegments()
+    showToast(`已刷新，共 ${segments.value.length} 个可访问网段`, 'success')
+  } catch (e) {
+    console.error('刷新可访问网段失败', e)
+    showToast('刷新可访问网段失败：' + (e.message || e), 'error')
+  } finally {
+    refreshing.value = false
   }
 }
 
 function openTest(seg, type) {
   testTarget.value = seg
   testType.value = type
-  testPort.value = type === 'tcp' ? '80' : type === 'udp' ? '53' : ''
+  testPort.value = type === 'tcp' ? '80' : ''
   testOutput.value = []
   testVisible.value = true
 }
@@ -76,51 +89,46 @@ async function runTest() {
   testOutput.value = []
 
   const seg = testTarget.value
-  const targetIp = seg.mapped_cidr.split('/')[0]
+  const targetIp = gatewayIp(seg.mapped_cidr)
   const time = new Date().toLocaleTimeString('zh-CN')
 
-  testOutput.value.push({ type: 'info', text: `[${time}] 开始测试 ${testType.value.toUpperCase()} -> ${targetIp}${testPort.value ? ':' + testPort.value : ''}` })
+  testOutput.value.push({
+    type: 'info',
+    text: `[${time}] 开始 ${testType.value.toUpperCase()} 测试 -> ${targetIp}${testType.value === 'tcp' ? ':' + testPort.value : ''}`
+  })
 
   if (testType.value === 'ping') {
-    // Ping 测试：使用 Tauri 的 test_connectivity 测试 ICMP（实际为 TCP 连通性近似）
     testOutput.value.push({ type: 'muted', text: '正在发送 Ping 请求...' })
     try {
-      const result = await testConnectivity(targetIp, 80)
+      const result = await pingTest(targetIp)
       if (result.success) {
-        testOutput.value.push({ type: 'success', text: `回复来自 ${targetIp}: 时间=${result.elapsed_ms}ms` })
-        testOutput.value.push({ type: 'success', text: `Ping 测试成功，耗时 ${result.elapsed_ms}ms` })
+        testOutput.value.push({ type: 'success', text: `回复来自 ${result.target || targetIp}: 时间=${result.elapsed_ms}ms` })
+        testOutput.value.push({ type: 'success', text: result.message })
+        showToast('Ping 测试成功', 'success')
       } else {
         testOutput.value.push({ type: 'error', text: `Ping 失败: ${result.message}` })
+        showToast('Ping 测试失败', 'error')
       }
     } catch (e) {
       testOutput.value.push({ type: 'error', text: `Ping 异常: ${e.message || e}` })
+      showToast('Ping 异常：' + (e.message || e), 'error')
     }
   } else if (testType.value === 'tcp') {
     const port = parseInt(testPort.value) || 80
     testOutput.value.push({ type: 'muted', text: `正在连接 TCP ${targetIp}:${port}...` })
     try {
-      const result = await testConnectivity(targetIp, port)
+      const result = await tcpTest(targetIp, port)
       if (result.success) {
-        testOutput.value.push({ type: 'success', text: `TCP 连接成功 ${targetIp}:${port}，耗时 ${result.elapsed_ms}ms` })
+        testOutput.value.push({ type: 'success', text: `TCP 连接成功 ${result.target || targetIp}:${result.port || port}，耗时 ${result.elapsed_ms}ms` })
+        testOutput.value.push({ type: 'success', text: result.message })
+        showToast('TCP 测试成功', 'success')
       } else {
         testOutput.value.push({ type: 'error', text: `TCP 连接失败: ${result.message}` })
+        showToast('TCP 测试失败', 'error')
       }
     } catch (e) {
       testOutput.value.push({ type: 'error', text: `TCP 异常: ${e.message || e}` })
-    }
-  } else if (testType.value === 'udp') {
-    const port = parseInt(testPort.value) || 53
-    testOutput.value.push({ type: 'muted', text: `正在测试 UDP ${targetIp}:${port}...` })
-    testOutput.value.push({ type: 'info', text: 'UDP 测试通过 TCP 连通性近似判断（桌面端暂不支持原生 UDP 探测）' })
-    try {
-      const result = await testConnectivity(targetIp, port)
-      if (result.success) {
-        testOutput.value.push({ type: 'success', text: `UDP 端口 ${targetIp}:${port} 可能开放，耗时 ${result.elapsed_ms}ms` })
-      } else {
-        testOutput.value.push({ type: 'error', text: `UDP 端口 ${targetIp}:${port} 可能不可达: ${result.message}` })
-      }
-    } catch (e) {
-      testOutput.value.push({ type: 'error', text: `UDP 异常: ${e.message || e}` })
+      showToast('TCP 异常：' + (e.message || e), 'error')
     }
   }
 
@@ -129,42 +137,34 @@ async function runTest() {
 }
 
 function resetFilters() {
-  filters.value = { keyword: '', status: '' }
+  filters.value = { keyword: '' }
 }
 
-async function init() {
-  try {
-    const config = await loadConfig()
-    if (config.server_addr) {
-      setServerAddr(config.server_addr)
-    }
-  } catch {
-    // ignore
-  }
-  await loadData()
-}
-
-onMounted(init)
+onMounted(loadData)
 </script>
 
 <template>
   <div>
     <div class="card">
+      <!-- 标题与计数 -->
+      <div class="card-title">
+        <span>可访问网段 ({{ segments.length }})</span>
+        <div class="actions">
+          <button class="btn btn-sm" @click="handleRefresh" :disabled="refreshing">
+            {{ refreshing ? '刷新中...' : '刷新' }}
+          </button>
+        </div>
+      </div>
+
       <!-- 筛选栏 -->
       <div class="toolbar">
-        <div class="toolbar-item">
-          <label>状态</label>
-          <select class="form-select" v-model="filters.status">
-            <option v-for="o in statusOptions" :key="o.value" :value="o.value">{{ o.label }}</option>
-          </select>
-        </div>
         <div class="toolbar-item">
           <label>关键词</label>
           <input class="form-input" v-model="filters.keyword" placeholder="客户 / 网段名称 / 地址" />
         </div>
         <div class="spacer"></div>
         <button class="btn" @click="resetFilters">重置</button>
-        <button class="btn" @click="loadData">刷新</button>
+        <button class="btn" @click="loadData" :disabled="loading">刷新列表</button>
       </div>
 
       <!-- 表格 -->
@@ -176,27 +176,28 @@ onMounted(init)
               <th>网段名称</th>
               <th>真实网段</th>
               <th>映射网段</th>
+              <th>网关 IP</th>
               <th>状态</th>
               <th>操作</th>
             </tr>
           </thead>
           <tbody>
             <tr v-if="loading">
-              <td colspan="6" class="text-center text-muted">加载中...</td>
+              <td colspan="7" class="text-center text-muted">加载中...</td>
             </tr>
             <tr v-else-if="!filteredSegments.length">
-              <td colspan="6" class="text-center text-muted">暂无数据</td>
+              <td colspan="7" class="text-center text-muted">暂无数据</td>
             </tr>
             <tr v-for="(seg, i) in filteredSegments" :key="i">
-              <td>{{ seg.node_name }}</td>
+              <td>{{ seg.target_node_name || seg.node_name }}</td>
               <td>{{ seg.segment_name }}</td>
               <td class="mono">{{ seg.real_cidr }}</td>
               <td class="mono">{{ seg.mapped_cidr }}</td>
-              <td><StatusBadge :status="seg.status" type="segment" /></td>
+              <td class="mono">{{ gatewayIp(seg.mapped_cidr) }}</td>
+              <td><StatusBadge status="active" type="segment" /></td>
               <td class="actions-cell">
                 <button class="btn-link" @click="openTest(seg, 'ping')">Ping</button>
                 <button class="btn-link" @click="openTest(seg, 'tcp')">TCP</button>
-                <button class="btn-link" @click="openTest(seg, 'udp')">UDP</button>
               </td>
             </tr>
           </tbody>
@@ -227,15 +228,11 @@ onMounted(init)
                     :class="['tab-btn', { active: testType === 'tcp' }]"
                     @click="testType = 'tcp'"
                   >TCP</button>
-                  <button
-                    :class="['tab-btn', { active: testType === 'udp' }]"
-                    @click="testType = 'udp'"
-                  >UDP</button>
                 </div>
               </div>
               <div class="form-group">
-                <label class="form-label">目标地址（映射 IP）</label>
-                <input class="form-input mono" :value="testTarget?.mapped_cidr?.split('/')[0]" disabled />
+                <label class="form-label">目标地址（映射网关 IP）</label>
+                <input class="form-input mono" :value="testTarget ? gatewayIp(testTarget.mapped_cidr) : ''" disabled />
               </div>
               <div v-if="testType !== 'ping'" class="form-group">
                 <label class="form-label">端口</label>
@@ -247,6 +244,7 @@ onMounted(init)
             </div>
             <div class="test-output">
               <div class="terminal">
+                <span v-if="!testOutput.length" class="term-line term-muted">等待测试...</span>
                 <span v-for="(line, i) in testOutput" :key="i" :class="['term-line', 'term-' + line.type]">{{ line.text }}</span>
                 <span v-if="testing" class="term-line term-muted">测试中...</span>
               </div>
@@ -255,6 +253,7 @@ onMounted(init)
         </div>
       </div>
     </teleport>
+
   </div>
 </template>
 

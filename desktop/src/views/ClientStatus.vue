@@ -1,94 +1,173 @@
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import ConnectionBar from '../components/ConnectionBar.vue'
-import StatusBadge from '../components/StatusBadge.vue'
-import { loadConfig, testConnectivity, getAppInfo } from '../tauri.js'
-import { setServerAddr, sendHeartbeat } from '../api.js'
+import { useToast } from '../composables/useToast.js'
+import {
+  getAppInfo,
+  getStatus,
+  getTunnelRoutes,
+  startTunnel,
+  stopTunnel,
+  disconnectAll,
+  testConnectivity
+} from '../tauri.js'
 
 const router = useRouter()
+const toast = useToast()
 
-const serverAddr = ref('')
-const nodeName = ref('')
-const connectionStatus = ref('disconnected')
-const nodeId = ref('')
-const virtualIp = ref('')
-const heartbeatStatus = ref('normal')
-const lastHeartbeat = ref('')
+const status = ref({
+  mode: 'idle',
+  connection_status: '已断开',
+  tunnel_status: '已断开',
+  node_id: null,
+  node_name: null,
+  virtual_ip: null,
+  server_addr: null,
+  accessible_segments_count: 0,
+  reported_segments_count: 0
+})
 const routes = ref([])
 const appInfo = ref({ os: '', arch: '', version: '' })
+const lastUpdate = ref('')
+
 const testing = ref(false)
 const testResult = ref(null)
+const tunnelLoading = ref(false)
+const disconnecting = ref(false)
 
-async function init() {
-  try {
-    const config = await loadConfig()
-    serverAddr.value = config.server_addr || '127.0.0.1:8443'
-    nodeName.value = config.node_name || ''
-    if (serverAddr.value) {
-      setServerAddr(serverAddr.value)
-    }
-  } catch {
-    // ignore
-  }
+let pollTimer = null
 
-  try {
-    appInfo.value = await getAppInfo()
-  } catch {
-    // ignore
-  }
-
-  // 模拟已连接状态（实际应从连接管理器获取）
-  if (nodeName.value) {
-    connectionStatus.value = 'connected'
-    nodeId.value = 'desktop-001'
-    await doHeartbeat()
+// 将后端返回的中文连接状态映射为 StatusBadge / ConnectionBar 使用的状态码
+function mapConnStatus(s) {
+  switch (s) {
+    case '已连接':
+      return 'connected'
+    case '连接中':
+    case '重连中':
+      return 'connecting'
+    case '连接失败':
+      return 'offline'
+    case '已断开':
+    default:
+      return 'disconnected'
   }
 }
 
-async function doHeartbeat() {
+// 状态颜色（直接展示后端返回的中文文案）
+function statusColor(s) {
+  if (['已连接', '已认证', '运行中'].includes(s)) return 'status-green'
+  if (['连接中', '重连中'].includes(s)) return 'status-yellow'
+  if (['连接失败', '错误'].includes(s)) return 'status-red'
+  return 'status-gray'
+}
+
+const connBadgeStatus = computed(() => mapConnStatus(status.value.connection_status))
+const isConnected = computed(() => status.value.connection_status === '已连接')
+const tunnelRunning = computed(() => status.value.tunnel_status === '运行中')
+
+const modeLabel = computed(() => {
+  switch (status.value.mode) {
+    case 'client':
+      return '客户端'
+    case 'operator':
+      return '实施端'
+    default:
+      return '未启动'
+  }
+})
+
+async function refreshStatus() {
   try {
-    const res = await sendHeartbeat({
-      node_id: nodeId.value,
-      reported_segments_count: 3
-    })
-    routes.value = res.routes || []
-    heartbeatStatus.value = 'normal'
-    lastHeartbeat.value = new Date().toLocaleString('zh-CN')
+    status.value = await getStatus()
+    lastUpdate.value = new Date().toLocaleString('zh-CN')
   } catch (e) {
-    heartbeatStatus.value = 'error'
-    console.error('心跳失败', e)
+    console.error('获取状态失败', e)
+  }
+  try {
+    routes.value = await getTunnelRoutes()
+  } catch (e) {
+    routes.value = []
+  }
+}
+
+async function handleStartTunnel() {
+  if (!isConnected.value) {
+    toast.warning('请先连接服务端')
+    return
+  }
+  tunnelLoading.value = true
+  try {
+    const res = await startTunnel()
+    routes.value = res.routes || []
+    toast.success('隧道已启动' + (res.virtual_ip ? '，虚拟 IP: ' + res.virtual_ip : ''))
+    await refreshStatus()
+  } catch (e) {
+    console.error('启动隧道失败', e)
+    toast.error('启动隧道失败: ' + (e.message || e))
+  } finally {
+    tunnelLoading.value = false
+  }
+}
+
+async function handleStopTunnel() {
+  tunnelLoading.value = true
+  try {
+    await stopTunnel()
+    routes.value = []
+    toast.success('隧道已停止')
+    await refreshStatus()
+  } catch (e) {
+    console.error('停止隧道失败', e)
+    toast.error('停止隧道失败: ' + (e.message || e))
+  } finally {
+    tunnelLoading.value = false
+  }
+}
+
+async function handleDisconnect() {
+  disconnecting.value = true
+  try {
+    await disconnectAll()
+    toast.success('已断开所有连接')
+    await refreshStatus()
+  } catch (e) {
+    console.error('断开失败', e)
+    toast.error('断开失败: ' + (e.message || e))
+  } finally {
+    disconnecting.value = false
   }
 }
 
 function handleConnect() {
-  connectionStatus.value = 'connected'
-  nodeId.value = 'desktop-001'
-  doHeartbeat()
-}
-
-function handleDisconnect() {
-  connectionStatus.value = 'disconnected'
-  nodeId.value = ''
-  routes.value = []
-  heartbeatStatus.value = 'normal'
-  lastHeartbeat.value = ''
+  // 跳转到客户端主界面进行连接
+  router.push('/client')
 }
 
 async function handleTestConnectivity() {
   testing.value = true
   testResult.value = null
   try {
-    const addr = serverAddr.value.replace(/^https?:\/\//, '').replace(/\/$/, '')
+    const addr = (status.value.server_addr || '').replace(/^https?:\/\//, '').replace(/\/$/, '')
+    if (!addr) {
+      toast.warning('未获取到服务端地址')
+      return
+    }
     const [host, portStr] = addr.split(':')
     const port = parseInt(portStr) || 8443
     testResult.value = await testConnectivity(host, port)
+    if (testResult.value.success) {
+      toast.success(testResult.value.message)
+    } else {
+      toast.error(testResult.value.message)
+    }
   } catch (e) {
     testResult.value = {
       success: false,
       elapsed_ms: 0,
       message: '测试失败: ' + (e.message || e)
     }
+    toast.error('测试失败: ' + (e.message || e))
   } finally {
     testing.value = false
   }
@@ -101,16 +180,17 @@ function exportLogs() {
     `导出时间: ${new Date().toLocaleString('zh-CN')}`,
     `软件版本: ${appInfo.value.version || '0.1.0'}`,
     `操作系统: ${appInfo.value.os} / ${appInfo.value.arch}`,
-    `当前模式: 客户端`,
-    `服务端地址: ${serverAddr.value}`,
-    `节点名称: ${nodeName.value}`,
-    `节点 ID: ${nodeId.value || '-'}`,
-    `虚拟 IP: ${virtualIp.value || '-'}`,
-    `连接状态: ${connectionStatus.value}`,
-    `心跳状态: ${heartbeatStatus.value}`,
-    `最后心跳: ${lastHeartbeat.value || '-'}`,
+    `运行模式: ${modeLabel.value}`,
+    `服务端地址: ${status.value.server_addr || '-'}`,
+    `节点名称: ${status.value.node_name || '-'}`,
+    `节点 ID: ${status.value.node_id || '-'}`,
+    `虚拟 IP: ${status.value.virtual_ip || '-'}`,
+    `连接状态: ${status.value.connection_status}`,
+    `隧道状态: ${status.value.tunnel_status}`,
+    `可访问网段数: ${status.value.accessible_segments_count}`,
+    `已上报网段数: ${status.value.reported_segments_count}`,
     '',
-    '---- 已下发路由 ----',
+    '---- 隧道路由 ----'
   ]
   routes.value.forEach((r, i) => {
     lines.push(`${i + 1}. ${r.mapped_cidr} -> ${r.target_node_name} (${r.real_cidr}) [${r.segment_name}]`)
@@ -125,6 +205,24 @@ function exportLogs() {
   URL.revokeObjectURL(url)
 }
 
+async function init() {
+  try {
+    appInfo.value = await getAppInfo()
+  } catch {
+    // 非 Tauri 环境（浏览器调试），使用默认值
+  }
+  await refreshStatus()
+  // 每 3 秒自动刷新状态
+  pollTimer = setInterval(refreshStatus, 3000)
+}
+
+onUnmounted(() => {
+  if (pollTimer) {
+    clearInterval(pollTimer)
+    pollTimer = null
+  }
+})
+
 onMounted(init)
 </script>
 
@@ -132,50 +230,77 @@ onMounted(init)
   <div>
     <!-- 连接状态栏 -->
     <ConnectionBar
-      :server-addr="serverAddr"
-      :status="connectionStatus"
-      :label="nodeName"
+      :server-addr="status.server_addr || ''"
+      :status="connBadgeStatus"
+      :label="status.node_name || ''"
       label-title="节点名称"
       @connect="handleConnect"
       @disconnect="handleDisconnect"
     />
 
-    <!-- 连接详情 -->
+    <!-- 综合状态 -->
     <div class="card">
       <div class="card-title">
-        <span>连接详情</span>
-        <button class="btn btn-sm" @click="doHeartbeat" :disabled="!nodeId">发送心跳</button>
+        <span>综合状态</span>
+        <button class="btn btn-sm" @click="refreshStatus">刷新</button>
       </div>
       <div class="desc-list">
+        <div class="desc-label">运行模式</div>
+        <div class="desc-value">{{ modeLabel }}</div>
         <div class="desc-label">连接状态</div>
         <div class="desc-value">
-          <StatusBadge :status="connectionStatus" type="node" />
+          <span class="status-badge" :class="statusColor(status.connection_status)">{{ status.connection_status || '-' }}</span>
+        </div>
+        <div class="desc-label">隧道状态</div>
+        <div class="desc-value">
+          <span class="status-badge" :class="statusColor(status.tunnel_status)">{{ status.tunnel_status || '-' }}</span>
         </div>
         <div class="desc-label">服务端地址</div>
-        <div class="desc-value mono">{{ serverAddr || '-' }}</div>
+        <div class="desc-value mono">{{ status.server_addr || '-' }}</div>
         <div class="desc-label">节点 ID</div>
-        <div class="desc-value mono">{{ nodeId || '-' }}</div>
+        <div class="desc-value mono">{{ status.node_id || '-' }}</div>
+        <div class="desc-label">节点名称</div>
+        <div class="desc-value">{{ status.node_name || '-' }}</div>
         <div class="desc-label">虚拟 IP</div>
-        <div class="desc-value mono">{{ virtualIp || '-' }}</div>
-        <div class="desc-label">心跳状态</div>
-        <div class="desc-value">
-          <span v-if="heartbeatStatus === 'normal'" class="status-badge status-green">正常</span>
-          <span v-else-if="heartbeatStatus === 'error'" class="status-badge status-red">异常</span>
-          <span v-else class="status-badge status-gray">未知</span>
-        </div>
-        <div class="desc-label">最后心跳</div>
-        <div class="desc-value">{{ lastHeartbeat || '-' }}</div>
+        <div class="desc-value mono">{{ status.virtual_ip || '-' }}</div>
+        <div class="desc-label">可访问网段</div>
+        <div class="desc-value">{{ status.accessible_segments_count }}</div>
+        <div class="desc-label">已上报网段</div>
+        <div class="desc-value">{{ status.reported_segments_count }}</div>
+        <div class="desc-label">最后刷新</div>
+        <div class="desc-value">{{ lastUpdate || '-' }}</div>
       </div>
     </div>
 
-    <!-- 已下发路由 -->
+    <!-- 隧道控制 -->
     <div class="card">
       <div class="card-title">
-        <span>已下发路由 ({{ routes.length }})</span>
+        <span>隧道控制 ({{ routes.length }})</span>
+        <div class="actions">
+          <button
+            v-if="!tunnelRunning"
+            class="btn btn-success btn-sm"
+            @click="handleStartTunnel"
+            :disabled="tunnelLoading || !isConnected"
+          >
+            {{ tunnelLoading ? '处理中...' : '启动隧道' }}
+          </button>
+          <button
+            v-else
+            class="btn btn-danger btn-sm"
+            @click="handleStopTunnel"
+            :disabled="tunnelLoading"
+          >
+            {{ tunnelLoading ? '处理中...' : '停止隧道' }}
+          </button>
+        </div>
       </div>
-      <div v-if="!routes.length" class="empty-state">
+      <div v-if="!isConnected" class="alert alert-warning">
+        请先连接服务端后再启动隧道。
+      </div>
+      <div v-else-if="!routes.length" class="empty-state">
         <div class="empty-icon">⇆</div>
-        <div>暂无已下发路由</div>
+        <div>{{ tunnelRunning ? '隧道已启动，暂无下发路由' : '点击「启动隧道」建立隧道连接' }}</div>
       </div>
       <div v-else class="table-wrap">
         <table class="data-table">

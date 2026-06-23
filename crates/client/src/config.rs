@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 use net_tool_common::NodeRole;
 
-use crate::CommonArgs;
+use crate::cli::CommonArgs;
 
 // 重新导出 ClientConfig，便于其它模块以 `config::ClientConfig` 引用。
 pub use net_tool_common::ClientConfig;

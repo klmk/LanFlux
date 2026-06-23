@@ -13,7 +13,7 @@ use tokio::process::Command;
 
 use crate::diagnostic;
 use crate::display;
-use crate::CommonArgs;
+use crate::cli::CommonArgs;
 
 /// 服务端模式入口。
 pub async fn run(bind: String, open: bool, common: CommonArgs) -> Result<()> {

@@ -10,10 +10,21 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
+tauri-plugin-shell = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+anyhow = "1"
+reqwest = { version = "0.12", features = ["json"] }
+chrono = { version = "0.4", features = ["serde"] }
+dirs = "5"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# 内部 crate
 net-tool-common = { path = "../../crates/common" }
 net-tool-network = { path = "../../crates/network" }
+net-tool-client = { path = "../../crates/client" }
 
 [features]
 # 此 feature 用于生产构建时启用 custom-protocol

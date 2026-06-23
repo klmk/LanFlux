@@ -15,6 +15,11 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
+use crate::client_manager::{
+    ClientManager, ConnectResult, ConvertIpResult, PingResult, RouteInfo, StatusInfo,
+    TcpTestResult, TunnelStartResult,
+};
+
 // ============================================================
 // 数据结构
 // ============================================================
@@ -218,6 +223,144 @@ pub fn load_config() -> Result<DesktopConfig, String> {
     let content = fs::read_to_string(&path).map_err(|e| format!("读取配置失败: {}", e))?;
     let config: DesktopConfig = serde_json::from_str(&content).map_err(|e| e.to_string())?;
     Ok(config)
+}
+
+// ============================================================
+// 网络连接命令
+// ============================================================
+
+/// 以客户端模式连接服务端
+#[tauri::command]
+pub async fn connect_client(
+    manager: tauri::State<'_, ClientManager>,
+    server_addr: String,
+    node_name: String,
+    remark: Option<String>,
+) -> Result<ConnectResult, String> {
+    manager
+        .connect_client(&server_addr, &node_name, remark)
+        .await
+}
+
+/// 以实施端模式连接服务端
+#[tauri::command]
+pub async fn connect_operator(
+    manager: tauri::State<'_, ClientManager>,
+    server_addr: String,
+    node_name: String,
+) -> Result<ConnectResult, String> {
+    manager.connect_operator(&server_addr, &node_name).await
+}
+
+/// 启动隧道
+#[tauri::command]
+pub async fn start_tunnel(
+    manager: tauri::State<'_, ClientManager>,
+) -> Result<TunnelStartResult, String> {
+    manager.start_tunnel().await
+}
+
+/// 停止隧道
+#[tauri::command]
+pub async fn stop_tunnel(
+    manager: tauri::State<'_, ClientManager>,
+) -> Result<(), String> {
+    manager.stop_tunnel().await
+}
+
+/// 断开所有连接
+#[tauri::command]
+pub async fn disconnect_all(
+    manager: tauri::State<'_, ClientManager>,
+) -> Result<(), String> {
+    manager.disconnect().await
+}
+
+/// 获取综合状态
+#[tauri::command]
+pub async fn get_status(
+    manager: tauri::State<'_, ClientManager>,
+) -> Result<StatusInfo, String> {
+    Ok(manager.get_status().await)
+}
+
+/// 获取隧道路由
+#[tauri::command]
+pub async fn get_tunnel_routes(
+    manager: tauri::State<'_, ClientManager>,
+) -> Result<Vec<RouteInfo>, String> {
+    Ok(manager.get_tunnel_routes().await)
+}
+
+/// 获取可访问网段（实施端）
+#[tauri::command]
+pub async fn get_accessible_segments(
+    manager: tauri::State<'_, ClientManager>,
+) -> Result<Vec<net_tool_common::RouteEntry>, String> {
+    Ok(manager.get_accessible_segments().await)
+}
+
+/// 刷新可访问网段
+#[tauri::command]
+pub async fn refresh_accessible_segments(
+    manager: tauri::State<'_, ClientManager>,
+) -> Result<Vec<net_tool_common::RouteEntry>, String> {
+    manager.refresh_accessible_segments().await
+}
+
+/// 获取已上报网段（客户端）
+#[tauri::command]
+pub async fn get_reported_segments(
+    manager: tauri::State<'_, ClientManager>,
+) -> Result<Vec<net_tool_common::SegmentSummary>, String> {
+    Ok(manager.get_reported_segments().await)
+}
+
+/// 刷新已上报网段
+#[tauri::command]
+pub async fn refresh_reported_segments(
+    manager: tauri::State<'_, ClientManager>,
+) -> Result<Vec<net_tool_common::SegmentSummary>, String> {
+    manager.refresh_reported_segments().await
+}
+
+/// 上报网段
+#[tauri::command]
+pub async fn report_segment(
+    manager: tauri::State<'_, ClientManager>,
+    name: String,
+    real_cidr: String,
+    remark: Option<String>,
+) -> Result<net_tool_common::ReportSegmentResponse, String> {
+    manager.report_segment(&name, &real_cidr, remark).await
+}
+
+/// Ping 测试
+#[tauri::command]
+pub async fn ping_test(
+    manager: tauri::State<'_, ClientManager>,
+    target_ip: String,
+) -> Result<PingResult, String> {
+    Ok(manager.ping_test(&target_ip).await)
+}
+
+/// TCP 连通性测试
+#[tauri::command]
+pub async fn tcp_test(
+    manager: tauri::State<'_, ClientManager>,
+    target_ip: String,
+    port: u16,
+) -> Result<TcpTestResult, String> {
+    Ok(manager.tcp_test(&target_ip, port).await)
+}
+
+/// IP 转换
+#[tauri::command]
+pub async fn convert_ip(
+    manager: tauri::State<'_, ClientManager>,
+    input_ip: String,
+) -> Result<ConvertIpResult, String> {
+    Ok(manager.convert_ip(&input_ip).await)
 }
 
 // ============================================================

@@ -1,13 +1,15 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { getAppInfo, loadConfig, saveConfig } from './tauri.js'
+import { getAppInfo, loadConfig } from './tauri.js'
+import ToastContainer from './components/ToastContainer.vue'
 
 const route = useRoute()
 const router = useRouter()
 
 const appVersion = ref('0.1.0')
-const currentMode = ref('')
+const appName = ref('NetTool')
+const configLoaded = ref(false)
 
 // 各模式侧边导航
 const navConfig = {
@@ -26,6 +28,15 @@ const navConfig = {
   ]
 }
 
+// 从路由推导当前模式，确保导航与视图始终一致
+const currentMode = computed(() => {
+  const path = route.path
+  if (path.startsWith('/client')) return 'client'
+  if (path.startsWith('/operator')) return 'operator'
+  if (path.startsWith('/server')) return 'server'
+  return ''
+})
+
 const navItems = computed(() => navConfig[currentMode.value] || [])
 
 const currentTitle = computed(() => route.meta.title || 'NetTool 组网工具')
@@ -40,23 +51,23 @@ function isActive(path) {
 }
 
 function switchMode() {
-  currentMode.value = ''
   router.push('/')
 }
 
 async function initApp() {
+  // 加载应用信息（版本号、名称等）
   try {
     const info = await getAppInfo()
-    appVersion.value = info.version
+    appVersion.value = info.version || appVersion.value
+    appName.value = info.name || appName.value
   } catch {
-    // 非 Tauri 环境（浏览器调试），使用默认版本
+    // 非 Tauri 环境（浏览器调试），使用默认值
   }
 
+  // 加载已保存的配置
   try {
-    const config = await loadConfig()
-    if (config.mode) {
-      currentMode.value = config.mode
-    }
+    await loadConfig()
+    configLoaded.value = true
   } catch {
     // 配置加载失败，停留在模式选择
   }
@@ -70,7 +81,7 @@ onMounted(initApp)
     <!-- 顶部标题栏 -->
     <header class="titlebar">
       <div class="titlebar-left">
-        <span class="titlebar-logo">NetTool</span>
+        <span class="titlebar-logo">{{ appName }}</span>
         <span class="titlebar-name">组网工具</span>
       </div>
       <div class="titlebar-center">
@@ -114,6 +125,9 @@ onMounted(initApp)
         </div>
       </main>
     </div>
+
+    <!-- 全局 Toast 通知 -->
+    <ToastContainer />
   </div>
 </template>
 

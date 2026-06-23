@@ -1,12 +1,10 @@
 <script setup>
 import { ref, onMounted } from 'vue'
-import { useRouter } from 'vue-router'
 import StatusBadge from '../components/StatusBadge.vue'
-import { scanInterfaces, loadConfig } from '../tauri.js'
-import { reportSegment, querySegments } from '../api.js'
-import { setServerAddr } from '../api.js'
+import { useToast } from '../composables/useToast.js'
+import { scanInterfaces, reportSegment, refreshReportedSegments } from '../tauri.js'
 
-const router = useRouter()
+const toast = useToast()
 
 const loading = ref(false)
 const scanning = ref(false)
@@ -16,7 +14,6 @@ const selectedIds = ref(new Set())
 const segmentNames = ref({})
 const segmentRemarks = ref({})
 const reportedSegments = ref([])
-const serverAddr = ref('')
 
 async function scan() {
   scanning.value = true
@@ -30,7 +27,7 @@ async function scan() {
     )
   } catch (e) {
     console.error('扫描网卡失败', e)
-    alert('扫描网卡失败: ' + (e.message || e))
+    toast.error('扫描网卡失败: ' + (e.message || e))
   } finally {
     scanning.value = false
   }
@@ -48,29 +45,38 @@ function toggleSelect(idx) {
 
 async function reportSelected() {
   if (selectedIds.value.size === 0) {
-    alert('请至少勾选一个网卡')
+    toast.warning('请至少勾选一个网卡')
     return
   }
 
   reporting.value = true
+  let successCount = 0
+  let failCount = 0
   try {
     for (const idx of selectedIds.value) {
       const iface = interfaces.value[idx]
       const name = segmentNames.value[idx] || `${iface.name} 网段`
       const remark = segmentRemarks.value[idx] || ''
 
-      await reportSegment({
-        node_id: 'desktop-001',
-        name,
-        real_cidr: iface.cidr,
-        remark: remark || null
-      })
+      try {
+        const res = await reportSegment(name, iface.cidr, remark || null)
+        successCount++
+        // 展示上报返回的映射网段
+        toast.success(`${name} 上报成功，映射网段: ${res.mapped_cidr || '-'}`)
+      } catch (e) {
+        failCount++
+        console.error('上报失败', e)
+        toast.error(`${name} 上报失败: ` + (e.message || e))
+      }
     }
-    alert('网段上报成功')
+
+    if (failCount === 0 && successCount > 0) {
+      toast.success(`全部上报完成，共 ${successCount} 个网段`)
+    } else if (failCount > 0) {
+      toast.warning(`上报完成：成功 ${successCount} 个，失败 ${failCount} 个`)
+    }
+
     await loadReported()
-  } catch (e) {
-    console.error('上报失败', e)
-    alert('上报失败: ' + (e.message || e))
   } finally {
     reporting.value = false
   }
@@ -79,24 +85,17 @@ async function reportSelected() {
 async function loadReported() {
   loading.value = true
   try {
-    reportedSegments.value = await querySegments('desktop-001')
+    reportedSegments.value = await refreshReportedSegments()
   } catch (e) {
     console.error('加载已上报网段失败', e)
+    reportedSegments.value = []
+    toast.error('加载已上报网段失败: ' + (e.message || e))
   } finally {
     loading.value = false
   }
 }
 
 async function init() {
-  try {
-    const config = await loadConfig()
-    serverAddr.value = config.server_addr || '127.0.0.1:8443'
-    if (serverAddr.value) {
-      setServerAddr(serverAddr.value)
-    }
-  } catch {
-    // ignore
-  }
   await scan()
   await loadReported()
 }
@@ -186,7 +185,7 @@ onMounted(init)
     <div class="card">
       <div class="card-title">
         <span>已上报网段 ({{ reportedSegments.length }})</span>
-        <button class="btn btn-sm" @click="loadReported">刷新</button>
+        <button class="btn btn-sm" @click="loadReported" :disabled="loading">刷新</button>
       </div>
       <div v-if="loading" class="loading-state">加载中...</div>
       <div v-else-if="!reportedSegments.length" class="empty-state">

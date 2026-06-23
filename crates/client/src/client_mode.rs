@@ -17,12 +17,12 @@ use tokio::sync::Mutex;
 
 use crate::config;
 use crate::connection::{self, ConnectionStatus, ServerConnection};
-use crate::detect_os;
+use crate::cli::detect_os;
 use crate::diagnostic;
 use crate::display;
 use crate::scanner;
 use crate::tunnel_client::{TunnelClient, TunnelHandle, get_tunnel_addr};
-use crate::{read_line, CommonArgs};
+use crate::cli::{read_line, CommonArgs};
 
 /// 客户端模式入口。
 pub async fn run(common: CommonArgs) -> Result<()> {

@@ -21,8 +21,12 @@ net-tool/
 │   ├── common/                 # 公共类型、协议定义
 │   ├── network/                # 底层网络能力（TUN / 隧道 / 转发）
 │   ├── server/                 # 服务端（HTTP API + Web 后台）
-│   └── client/                 # 客户端 / 实施端 CLI
+│   └── client/                 # 客户端 / 实施端（CLI + 库）
 ├── web-admin/                  # Web 管理后台前端源码
+├── desktop/                    # 桌面客户端（Tauri 2.0 + Vue 3）
+│   ├── src/                    # Vue 前端源码
+│   ├── src-tauri/              # Tauri Rust 后端
+│   └── package.json
 ├── docker/                     # Docker 相关文件
 │   └── entrypoint.sh           # 容器入口脚本
 ├── scripts/                    # 辅助脚本
@@ -59,6 +63,8 @@ net-tool/
 ```bash
 ./scripts/build.sh --server-only   # 仅构建服务端
 ./scripts/build.sh --web-only      # 仅构建前端
+./scripts/build.sh --desktop       # 构建桌面端（Tauri）
+./scripts/build.sh --all           # 完整构建 + 桌面端
 ```
 
 ### 手动构建
@@ -82,6 +88,48 @@ cd ..
 | 服务端二进制 | `target/release/net-tool-server` | 独立服务端 |
 | 客户端二进制 | `target/release/net-tool` | client / operator CLI |
 | Web 静态资源 | `web-admin/dist/` | 管理后台前端 |
+
+### 构建桌面客户端
+
+桌面客户端基于 Tauri 2.0 + Vue 3，提供完整的 GUI 界面，支持客户端模式和实施端模式。
+
+**环境要求**：
+- Rust 1.96+ 和 Cargo
+- Node.js 22+ 和 npm
+- Tauri CLI 2.0（`npm install -g @tauri-apps/cli`）
+- Linux 需要 `webkit2gtk`、`librsvg` 等系统依赖
+- Windows 需要 WebView2 Runtime
+
+**构建步骤**：
+
+```bash
+# 方式一：使用构建脚本
+./scripts/build.sh --desktop
+
+# 方式二：手动构建
+cd desktop
+npm install
+npx tauri build
+```
+
+**开发模式**（热重载）：
+
+```bash
+cd desktop
+npm install
+npx tauri dev
+```
+
+构建产物位于 `desktop/src-tauri/target/release/bundle/`，包含对应平台的安装包：
+- Linux: `.deb` / `.AppImage`
+- Windows: `.msi` / `.exe`
+- macOS: `.dmg` / `.app`
+
+**桌面客户端功能**：
+- 模式选择：服务端 / 客户端 / 实施端
+- 客户端模式：连接服务端、上报网段、隧道管理、状态监控
+- 实施端模式：连接服务端、查看可访问网段、隧道管理、Ping/TCP 测试、IP 转换
+- 服务端模式：服务端状态检测、打开 Web 管理后台
 
 ## 部署方法
 

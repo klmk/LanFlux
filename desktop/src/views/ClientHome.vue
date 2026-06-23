@@ -3,10 +3,19 @@ import { ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import ConnectionBar from '../components/ConnectionBar.vue'
 import StatusBadge from '../components/StatusBadge.vue'
-import { loadConfig, saveConfig } from '../tauri.js'
-import { setServerAddr, registerNode, querySegments } from '../api.js'
+import { useToast } from '../composables/useToast.js'
+import {
+  loadConfig,
+  saveConfig,
+  getStatus,
+  connectClient,
+  disconnectAll,
+  testConnectivity,
+  refreshReportedSegments
+} from '../tauri.js'
 
 const router = useRouter()
+const toast = useToast()
 
 const serverAddr = ref('127.0.0.1:8443')
 const nodeName = ref('')
@@ -14,9 +23,30 @@ const remark = ref('')
 const autoReconnect = ref(true)
 const connectionStatus = ref('disconnected')
 const nodeId = ref('')
+const virtualIp = ref('')
 const segments = ref([])
 const loading = ref(false)
 const connecting = ref(false)
+
+// 连通性测试
+const testing = ref(false)
+const testResult = ref(null)
+
+// 将后端返回的中文连接状态映射为 StatusBadge 使用的状态码
+function mapConnStatus(s) {
+  switch (s) {
+    case '已连接':
+      return 'connected'
+    case '连接中':
+    case '重连中':
+      return 'connecting'
+    case '连接失败':
+      return 'offline'
+    case '已断开':
+    default:
+      return 'disconnected'
+  }
+}
 
 async function initConfig() {
   try {
@@ -28,15 +58,28 @@ async function initConfig() {
   } catch {
     // ignore
   }
+
+  // 读取实际连接状态（后端连接在页面切换间保持）
+  try {
+    const st = await getStatus()
+    connectionStatus.value = mapConnStatus(st.connection_status)
+    nodeId.value = st.node_id || ''
+    virtualIp.value = st.virtual_ip || ''
+  } catch {
+    // ignore
+  }
+
+  // 加载已上报网段
+  await loadSegments()
 }
 
 async function handleConnect() {
   if (!serverAddr.value.trim()) {
-    alert('请输入服务端地址')
+    toast.warning('请输入服务端地址')
     return
   }
   if (!nodeName.value.trim()) {
-    alert('请输入节点名称')
+    toast.warning('请输入节点名称')
     return
   }
 
@@ -44,7 +87,13 @@ async function handleConnect() {
   connectionStatus.value = 'connecting'
 
   try {
-    // 保存配置
+    // 以客户端模式连接服务端
+    const res = await connectClient(serverAddr.value, nodeName.value, remark.value || null)
+    nodeId.value = res.node_id
+    virtualIp.value = res.virtual_ip || ''
+    connectionStatus.value = 'connected'
+
+    // 连接成功后保存配置
     await saveConfig({
       mode: 'client',
       server_addr: serverAddr.value,
@@ -53,59 +102,76 @@ async function handleConnect() {
       auto_reconnect: autoReconnect.value
     })
 
-    // 设置 API 服务端地址
-    setServerAddr(serverAddr.value)
+    toast.success('连接成功，节点 ID: ' + res.node_id)
 
-    // 注册节点
-    const res = await registerNode({
-      name: nodeName.value,
-      role: 'client',
-      os_type: detectOs(),
-      remark: remark.value || null
-    })
-    nodeId.value = res.node_id
-
-    connectionStatus.value = 'connected'
-
-    // 加载已上报网段
-    await loadSegments()
+    // 跳转到连接状态页
+    router.push('/client/status')
   } catch (e) {
     console.error('连接失败', e)
     connectionStatus.value = 'disconnected'
-    alert('连接失败: ' + (e.message || e))
+    toast.error('连接失败: ' + (e.message || e))
   } finally {
     connecting.value = false
   }
 }
 
-function handleDisconnect() {
+async function handleDisconnect() {
+  try {
+    await disconnectAll()
+    toast.success('已断开连接')
+  } catch (e) {
+    console.error('断开失败', e)
+    toast.error('断开失败: ' + (e.message || e))
+  }
   connectionStatus.value = 'disconnected'
   nodeId.value = ''
+  virtualIp.value = ''
   segments.value = []
 }
 
 async function loadSegments() {
-  if (!nodeId.value) return
   loading.value = true
   try {
-    segments.value = await querySegments(nodeId.value)
+    segments.value = await refreshReportedSegments()
   } catch (e) {
-    console.error('加载网段失败', e)
+    // 未连接时刷新会失败，静默处理
+    segments.value = []
   } finally {
     loading.value = false
   }
 }
 
-function goSegments() {
-  router.push('/client/segments')
+async function handleTestConnectivity() {
+  if (!serverAddr.value.trim()) {
+    toast.warning('请先输入服务端地址')
+    return
+  }
+  testing.value = true
+  testResult.value = null
+  try {
+    const addr = serverAddr.value.replace(/^https?:\/\//, '').replace(/\/$/, '')
+    const [host, portStr] = addr.split(':')
+    const port = parseInt(portStr) || 8443
+    testResult.value = await testConnectivity(host, port)
+    if (testResult.value.success) {
+      toast.success(testResult.value.message)
+    } else {
+      toast.error(testResult.value.message)
+    }
+  } catch (e) {
+    testResult.value = {
+      success: false,
+      elapsed_ms: 0,
+      message: '测试失败: ' + (e.message || e)
+    }
+    toast.error('测试失败: ' + (e.message || e))
+  } finally {
+    testing.value = false
+  }
 }
 
-function detectOs() {
-  const ua = navigator.userAgent
-  if (ua.includes('Win')) return 'windows'
-  if (ua.includes('Linux')) return 'linux'
-  if (ua.includes('Mac')) return 'macos'
-  return 'unknown'
+function goSegments() {
+  router.push('/client/segments')
 }
 
 onMounted(initConfig)
@@ -166,6 +232,22 @@ onMounted(initConfig)
           </label>
         </div>
       </div>
+
+      <!-- 连通性测试 -->
+      <div class="conn-test">
+        <button
+          class="btn"
+          @click="handleTestConnectivity"
+          :disabled="testing || connectionStatus !== 'disconnected'"
+        >
+          {{ testing ? '测试中...' : '测试连通性' }}
+        </button>
+        <div v-if="testResult" class="test-result" :class="testResult.success ? 'test-success' : 'test-fail'">
+          <span class="test-mark">{{ testResult.success ? '[OK]' : '[FAIL]' }}</span>
+          <span class="test-msg">{{ testResult.message }}</span>
+          <span class="test-time">({{ testResult.elapsed_ms }} ms)</span>
+        </div>
+      </div>
     </div>
 
     <!-- 已上报网段列表 -->
@@ -173,7 +255,7 @@ onMounted(initConfig)
       <div class="card-title">
         <span>已上报网段 ({{ segments.length }})</span>
         <div class="actions">
-          <button class="btn btn-sm" @click="loadSegments" :disabled="!nodeId">刷新</button>
+          <button class="btn btn-sm" @click="loadSegments">刷新</button>
           <button class="btn btn-primary btn-sm" @click="goSegments">添加网段</button>
         </div>
       </div>
@@ -221,5 +303,41 @@ onMounted(initConfig)
 
 .checkbox-label input {
   cursor: pointer;
+}
+
+.conn-test {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 4px;
+}
+
+.test-result {
+  padding: 6px 12px;
+  border-radius: var(--radius);
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.test-success {
+  background: var(--status-green-bg);
+  color: var(--status-green);
+}
+
+.test-fail {
+  background: var(--status-red-bg);
+  color: var(--status-red);
+}
+
+.test-mark {
+  font-weight: 700;
+}
+
+.test-time {
+  color: var(--text-muted);
+  font-size: 12px;
 }
 </style>
